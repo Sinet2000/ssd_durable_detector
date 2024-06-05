@@ -4,6 +4,7 @@ import numpy as np
 import sys
 import glob
 import importlib.util
+import logging
 
 from az_models import SSDDetectorResult
 from utils import save_detection_result
@@ -12,60 +13,63 @@ from az_models.enums import DetectorType
 
 # python TFLite_detection_image.py --modeldir=ssd_model_lite --imagedir images --save_results --noshow_results
 class SSDDetector:
-    def __init__(self, model_name, tf_lite_file_name = 'detect.tflite', labels_file_name='labelmap.txt'):
-        self.model_name = model_name
-        self.min_conf_threshold = float(0.5)
+    def __init__(self, model_name, tf_lite_file_name = 'detect.tflite', labels_file_name='labelmap.txt', use_TPU = False):
 
-        # Import TensorFlow libraries
-        # If tflite_runtime is installed, import interpreter from tflite_runtime, else import from regular tensorflow
-        # If using Coral Edge TPU, import the load_delegate library
-        pkg = importlib.util.find_spec('tflite_runtime')
-        if pkg:
-            from tflite_runtime.interpreter import Interpreter
-            if use_TPU:
-                from tflite_runtime.interpreter import load_delegate
-        else:
+        try:
+            self.min_conf_threshold = float(0.5)
+            self.labels = []
+
+            # Import TensorFlow libraries
+            # pkg = importlib.util.find_spec('tflite_runtime')
+            # if pkg:
+            #     from tflite_runtime.interpreter import Interpreter
+            #     if use_TPU:
+            #         from tflite_runtime.interpreter import load_delegate
+            # else:
+            #     from tensorflow.lite.python.interpreter import Interpreter
+            #     if use_TPU:
+            #         from tensorflow.lite.python.interpreter import load_delegate
             from tensorflow.lite.python.interpreter import Interpreter
-            if use_TPU:
-                from tensorflow.lite.python.interpreter import load_delegate
-
-        self.working_dir_path = os.getcwd()
         
-        # Path to .tflite file, which contains the model that is used for object detection
-        self.path_to_tf_model = os.path.join(self.working_dir_path, model_name, tf_lite_file_name)
-        self.path_to_labels = os.path.join(self.working_dir_path, model_name, labels_file_name)
-
-        with open(self.path_to_labels, 'r') as f:
-            self.labels = [line.strip() for line in f.readlines()]
-        
-        if self.labels[0] == '???':
-            del(self.labels[0])
-
-        
-        # Load the Tensorflow Lite model.
-        self.interpreter = Interpreter(model_path=self.path_to_tf_model)
-        self.interpreter.allocate_tensors()
-
-        self.input_details = self.interpreter.get_input_details()
-        self.output_details = self.interpreter.get_output_details()
-        self.height = self.input_details[0]['shape'][1]
-        self.width = self.input_details[0]['shape'][2]
-
-        self.floating_model = (self.input_details[0]['dtype'] == np.float32)
-
-        self.input_mean = 127.5
-        self.input_std = 127.5
-        
-        # Check output layer name to determine if this model was created with TF2 or TF1,
-        # because outputs are ordered differently for TF2 and TF1 models
-        outname = self.output_details[0]['name']
-        
-        if ('StatefulPartitionedCall' in outname): # This is a TF2 model
-            self.boxes_idx, self.classes_idx, self.scores_idx = 1, 3, 0
-        else: # This is a TF1 model
-            self.boxes_idx, self.classes_idx, self.scores_idx = 0, 1, 2
+            working_dir_path = os.getcwd()
             
-    def process_image_and_get_predictions(self, img_path, result_img_dir) -> SSDDetectorResult:
+            # Path to .tflite file and labels
+            path_to_tf_model = os.path.join(working_dir_path, model_name, tf_lite_file_name)
+            path_to_labels = os.path.join(working_dir_path, model_name, labels_file_name)
+
+            with open(path_to_labels, 'r') as f:
+                self.labels = [line.strip() for line in f.readlines()]
+            
+            if self.labels and self.labels[0] == '???':
+                del self.labels[0]
+            
+            # Load the TensorFlow Lite model
+            self.interpreter = Interpreter(model_path=path_to_tf_model)
+            self.interpreter.allocate_tensors()
+
+            self.input_details = self.interpreter.get_input_details()
+            self.output_details = self.interpreter.get_output_details()
+            self.height = self.input_details[0]['shape'][1]
+            self.width = self.input_details[0]['shape'][2]
+            logging.info("Height value: %s", self.height)
+            logging.info("Width value: %s", self.width)
+
+            self.floating_model = (self.input_details[0]['dtype'] == np.float32)
+            self.input_mean = 127.5
+            self.input_std = 127.5
+            
+            # Check output layer name to determine model type
+            outname = self.output_details[0]['name']
+            
+            if 'StatefulPartitionedCall' in outname: # TF2 model
+                self.boxes_idx, self.classes_idx, self.scores_idx = 1, 3, 0
+            else: # TF1 model
+                self.boxes_idx, self.classes_idx, self.scores_idx = 0, 1, 2
+        except Exception as e:
+            logging.error("Error occurred during SSDDetector __init__: %s", e)
+            pass  # Ignore errors and continue code execution
+            
+    def process_image_and_get_predictions(self, img_path, result_img_dir_path) -> SSDDetectorResult:
         
         try:
             
@@ -118,7 +122,7 @@ class SSDDetector:
                     image_fn = os.path.basename(img_path)
 
                     # Save image
-                    det_img_filename, det_img_path = save_detection_result(image, result_img_dir, image_fn, DetectorType.SSD)
+                    det_img_filename, det_img_path = save_detection_result(image, result_img_dir_path, image_fn, DetectorType.SSD)
                     
                     highest_confidence_detection_label = ""  # Default label
                     highest_confidence_score = 0.0  # Default score
@@ -128,8 +132,14 @@ class SSDDetector:
                         if confidence_score > highest_confidence_score:
                             highest_confidence_detection_label = detection[0]
                             highest_confidence_score = confidence_score
-                            
-                    return SSDDetectorResult(label=highest_confidence_detection_label, value=highest_confidence_score, error_message="", det_img_filename=det_img_filename, det_img_path=det_img_path)      
+                    
+                    # Log the detection result
+                    result = SSDDetectorResult(label=highest_confidence_detection_label, value=highest_confidence_score, det_img_filename=det_img_filename, det_img_path=det_img_path)
+                    logging.info(f"Detection result: {result}")
+
+                    # Return the detection result
+                    return result    
         
         except Exception as e:
+            logging.error("Error occurred during process_image_and_get_predictions: %s", e)
             return SSDDetectorResult(error_message=str(e))

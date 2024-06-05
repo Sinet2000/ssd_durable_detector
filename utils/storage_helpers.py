@@ -1,6 +1,7 @@
 import uuid
 import os
 import cv2
+import logging
 
 from PIL import Image
 from pathlib import Path
@@ -69,8 +70,8 @@ def save_detection_result(image, directory: str, source_img_name: str, detector_
     """
     try:
         # Ensure the directory exists
-        path = Path(directory)
-        path.mkdir(parents=True, exist_ok=True)
+        if not os.path.exists(directory):
+            os.makedirs(directory)
 
         # Check if the source image has a valid image extension
         valid_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff'}
@@ -91,15 +92,15 @@ def save_detection_result(image, directory: str, source_img_name: str, detector_
         new_filename = f"{prefix}{source_img_name_without_ext}_{unique_id}{img_ext}"
 
         # Full path for the image
-        image_path = path / new_filename
+        image_path = os.path.join(directory, new_filename)
 
         # Save the image
         cv2.imwrite(image_path, image)
-        print(f"Image saved successfully at: {image_path}")
+        logging.info(f"Image saved successfully at: {image_path}")
 
-        return new_filename, str(image_path)
+        return new_filename, image_path
     except Exception as e:
-        print(f"An error occurred while saving the image: {e}")
+        logging.error(f"An error occurred while saving the image: {e}")
         return None, None
     
 def save_img_to_directory(image: Image.Image, directory: str, source_img_name: str) -> str:

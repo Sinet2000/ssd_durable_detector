@@ -9,7 +9,10 @@ from managers import AzureBlobManager, AzureTableStorageManager
 from az_models import BlobToProcessQueueMessage, VisioDetectorHttpRequest, ImagePredictionResult
 from az_models.enums import BlobProcessStatus, DetectorType
 from ssd_detector import SSDDetector
-from utils import get_child_directory_path
+from utils import get_child_directory_path, configure_logging
+
+# Assuming you have configured logging already
+configure_logging('sys-logs')
 
 blob_container_name = os.environ.get("BlobContainerName")
 blob_connection_string = os.environ.get("BlobConnectionString")
@@ -24,18 +27,15 @@ azure_table_storage_manager = AzureTableStorageManager(table_connection_string, 
 
 source_img_dir = 'images'
 result_img_dir = 'images_results'
-
-def delete_file_if_exists(file_path):
-    if os.path.exists(file_path):
-        os.remove(file_path)
-        print(f"File '{file_path}' deleted successfully.")
-    else:
-        print(f"File '{file_path}' does not exist.")
         
 # We can provide a key, and use function level: https://learn.microsoft.com/en-us/azure/azure-functions/functions-bindings-http-webhook-trigger?tabs=python-v2%2Cisolated-process%2Cnodejs-v4%2Cfunctionsv2&pivots=programming-language-python
 app = df.DFApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 
-ssd_detector = SSDDetector('ssd_model_lite')
+try:
+    ssd_detector = SSDDetector('ssd_model_lite')
+except Exception as ex:
+    logging.error("SSD: Func App initialisation - error occurred while initialising SSD Detector: %s", ex)
+    
 
 @app.function_name(name="ObjectDetectionHttpTrigger")
 @app.route(route="ssd/detect", methods=("POST",))
@@ -74,7 +74,7 @@ def image_detection_orchestrator(context: df.DurableOrchestrationContext):
             result = ImagePredictionResult(
                 image_name=visio_detector_req.file_name,
                 detector_type=visio_detector_req.detector_type,
-                errors= "The detector type is incorrect, must be Mask RCNN",
+                errors= "The detector type is incorrect, must be SSD",
                 has_errors=True
                 ).to_json()
 
@@ -84,7 +84,7 @@ def image_detection_orchestrator(context: df.DurableOrchestrationContext):
         logging.error(f"An unexpected error occurred: {ex}")
         return ImagePredictionResult(
             image_name=visio_detector_json['fileName'],
-            detector_type=DetectorType.UNKNOWN,
+            detector_type=DetectorType.SSD,
             errors= str(ex),
             has_errors=True
             ).to_json()
@@ -102,10 +102,17 @@ def run_ssd_detection_activity(visioDetectorReqStr: str) -> str:
         source_img_path = azure_blob_manager.download_and_upload_file(visioDetectorModel.file_name, file_download_dir)
 
         detector_type = DetectorType.SSD
-        ssd_prediction_result = ssd_detector.process_image_and_get_predictions(source_img_path, get_child_directory_path(result_img_dir))
+        
+        result_img_dir_path = get_child_directory_path(result_img_dir)
+        logging.info(f"result_img_dir_path: {result_img_dir_path}")
+        logging.info(f"source_img_path: {source_img_path}")
+        
+        ssd_prediction_result = ssd_detector.process_image_and_get_predictions(source_img_path, result_img_dir_path)
+        logging.info(f"ssd_prediction_result: {ssd_prediction_result}")
+        
         if ssd_prediction_result.error_message:
             return ImagePredictionResult(
-                file_name=visioDetectorModel.file_name,
+                image_name=visioDetectorModel.file_name,
                 detector_type=detector_type,
                 errors=ssd_prediction_result.error_message,
                 has_errors=True
@@ -115,7 +122,7 @@ def run_ssd_detection_activity(visioDetectorReqStr: str) -> str:
             image_name=visioDetectorModel.file_name,
             detector_type=detector_type,
             classification = ssd_prediction_result.label,
-            result_img_name=visioDetectorModel.file_name,
+            result_img_name=ssd_prediction_result.det_img_filename,
             result_img_path=ssd_prediction_result.det_img_path,
             prediction=float(ssd_prediction_result.value),
             time_taken=0.5)
